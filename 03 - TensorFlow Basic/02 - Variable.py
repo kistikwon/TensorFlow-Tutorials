@@ -1,7 +1,8 @@
 # 플레이스홀더와 변수의 개념을 익혀봅니다
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 
-# tf.placeholder: 계산을 실행할 때 입력값을 받는 변수로 사용합니다.
+# tf.placeholder: 계산을 실행할 때 입력값을 받는 변수로 사용합니다.pu
 # None 은 크기가 정해지지 않았음을 의미합니다.
 X = tf.placeholder(tf.float32, [None, 3])
 print(X)
