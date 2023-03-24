@@ -1,5 +1,7 @@
 # 텐서플로우의 기본적인 구성을 익힙니다.
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+
 
 # tf.constant: 말 그대로 상수입니다.
 hello = tf.constant('Hello, TensorFlow!')
