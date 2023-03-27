@@ -64,7 +64,7 @@ init = tf.global_variables_initializer()
 sess = tf.Session()
 sess.run(init)
 
-for step in range(100):
+for step in range(1000):
     sess.run(train_op, feed_dict={X: x_data, Y: y_data})
 
     if (step + 1) % 10 == 0:
