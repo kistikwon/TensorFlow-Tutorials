@@ -57,7 +57,9 @@ flags.DEFINE_string("job_name", None, "job name: worker or ps")
 
 FLAGS = flags.FLAGS
 
-IMAGE_PIXELS = 28
+# Example:
+cluster = {'ps': ['host1:2222', 'host2:2222'],'worker': ['host3:2222', 'host4:2222', 'host5:2222']}
+os.environ['TF_CONFIG'] = json.dumps({'cluster': cluster,'task': {'type': 'worker', 'index': 1}})
 
 
 def next_batch(num, data, labels):
@@ -113,17 +115,27 @@ def main(unused_argv):
   FLAGS.task_index = task_index
   batch_size = FLAGS.batch_size
 
-  x_data = [1, 2, 3]
-  y_data = [1, 2, 3]
+  if FLAGS.download_only:
+    sys.exit(0)
 
-  W = tf.Variable(tf.random_uniform([1], -1.0, 1.0))
-  b = tf.Variable(tf.random_uniform([1], -1.0, 1.0))
+  if FLAGS.job_name is None or FLAGS.job_name == "":
+    raise ValueError("Must specify an explicit `job_name`")
+  if FLAGS.task_index is None or FLAGS.task_index == "":
+    raise ValueError("Must specify an explicit `task_index`")
 
-  # name: 나중에 텐서보드등으로 값의 변화를 추적하거나 살펴보기 쉽게 하기 위해 이름을 붙여줍니다.
-  X = tf.placeholder(tf.float32, name="X")
-  Y = tf.placeholder(tf.float32, name="Y")
-  print(X)
-  print(Y)
+  print("job name = %s" % FLAGS.job_name)
+  print("task index = %d" % FLAGS.task_index)
+
+  cluster_config = tf_config.get('cluster', {})
+  ps_hosts = cluster_config.get('ps')
+  worker_hosts = cluster_config.get('worker')
+
+  ps_hosts_str = ','.join(ps_hosts)
+  worker_hosts_str = ','.join(worker_hosts)
+
+  FLAGS.ps_hosts = ps_hosts_str
+  FLAGS.worker_hosts = worker_hosts_str
+
 
 if __name__ == "__main__":
   tf.app.run()
