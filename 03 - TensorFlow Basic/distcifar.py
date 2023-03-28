@@ -58,8 +58,8 @@ flags.DEFINE_string("job_name", None, "job name: worker or ps")
 FLAGS = flags.FLAGS
 
 # Example:
-cluster = {'ps': ['host1:2222', 'host2:2222'],'worker': ['host3:2222', 'host4:2222', 'host5:2222']}
-os.environ['TF_CONFIG'] = json.dumps({'cluster': cluster,'task': {'type': 'worker', 'index': 1}})
+#cluster = {'ps': ['host1:2222', 'host2:2222'],'worker': ['host3:2222', 'host4:2222', 'host5:2222']}
+#os.environ['TF_CONFIG'] = json.dumps({'cluster': cluster,'task': {'type': 'ps', 'index': 1}})
 
 
 def next_batch(num, data, labels):
@@ -138,6 +138,185 @@ def main(unused_argv):
   
   print("ps_hosts = %s" % FLAGS.ps_hosts)
   print("worker_hosts = %s" % FLAGS.worker_hosts)
+
+  # Construct the cluster and start the server
+  ps_spec = FLAGS.ps_hosts.split(",")
+  worker_spec = FLAGS.worker_hosts.split(",")
+
+  # Get the number of workers.
+  num_workers = len(worker_spec)
+
+  cluster = tf.train.ClusterSpec({"ps": ps_spec, "worker": worker_spec})
+
+  if not FLAGS.existing_servers:
+    # Not using existing servers. Create an in-process server.
+    server = tf.train.Server(
+        cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
+    if FLAGS.job_name == "ps":
+      server.join()
+
+  is_chief = (FLAGS.task_index == 0)
+  if FLAGS.num_gpus > 0:
+    # Avoid gpu allocation conflict: now allocate task_num -> #gpu
+    # for each worker in the corresponding machine
+    gpu = (FLAGS.task_index % FLAGS.num_gpus)
+    worker_device = "/job:worker/task:%d/gpu:%d" % (FLAGS.task_index, gpu)
+  elif FLAGS.num_gpus == 0:
+    # Just allocate the CPU to worker server
+    cpu = 0
+    worker_device = "/job:worker/task:%d/cpu:%d" % (FLAGS.task_index, cpu)
+  # The device setter will automatically place Variables ops on separate
+  # parameter servers (ps). The non-Variable ops will be placed on the workers.
+  # The ps use CPU and workers use corresponding GPU
+  with tf.device(
+      tf.train.replica_device_setter(
+          worker_device=worker_device,
+          ps_device="/job:ps/cpu:0",
+          cluster=cluster)):
+    global_step = tf.Variable(0, name="global_step", trainable=False)
+
+
+    # Ops: located on the worker specified with FLAGS.task_index
+
+    #x = tf.placeholder(tf.float32, [None, 784])
+    #w = tf.Variable(tf.zeros([784,10]))
+    #wo = tf.Variable(tf.zeros([10]))
+    #f = tf.matmul(x,w)+wo
+    #p = tf.nn.softmax(f)               
+    #t = tf.placeholder(tf.float32, [None, 10])
+    #loss = -tf.reduce_sum(t*tf.log(p))
+
+    opt = tf.train.AdamOptimizer(FLAGS.learning_rate)
+
+    x = tf.placeholder(tf.float32, shape=[None, 32, 32, 3])
+    y = tf.placeholder(tf.float32, shape=[None, 10])
+    keep_prob = tf.placeholder(tf.float32)
+
+    (x_train, y_train), (x_test, y_test) = load_data()
+    y_train_one_hot = tf.squeeze(tf.one_hot(y_train, 10),axis=1)
+    y_test_one_hot = tf.squeeze(tf.one_hot(y_test, 10),axis=1)
+
+    y_pred, logits = build_CNN_classifier(x)
+
+    loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=logits))
+
+    correct_prediction = tf.equal(tf.argmax(y_pred, 1), tf.argmax(y, 1))
+    accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+    total_batch = int (len(x_train) / batch_size)
+
+    if FLAGS.sync_replicas:
+      if FLAGS.replicas_to_aggregate is None:
+        replicas_to_aggregate = num_workers
+      else:
+        replicas_to_aggregate = FLAGS.replicas_to_aggregate
+
+      opt = tf.train.SyncReplicasOptimizer(
+          opt,
+          replicas_to_aggregate=replicas_to_aggregate,
+          total_num_replicas=num_workers,
+          name="mnist_sync_replicas")
+
+    train_step = opt.minimize(loss, global_step=global_step)
+
+    if FLAGS.sync_replicas:
+      local_init_op = opt.local_step_init_op
+      if is_chief:
+        local_init_op = opt.chief_init_op
+
+      ready_for_local_init_op = opt.ready_for_local_init_op
+
+      # Initial token and chief queue runners required by the sync_replicas mode
+      chief_queue_runner = opt.get_chief_queue_runner()
+      sync_init_op = opt.get_init_tokens_op()
+
+    init_op = tf.global_variables_initializer()
+    train_dir = tempfile.mkdtemp()
+
+    if FLAGS.sync_replicas:
+      sv = tf.train.Supervisor(
+          is_chief=is_chief,
+          logdir=train_dir,
+          init_op=init_op,
+          local_init_op=local_init_op,
+          ready_for_local_init_op=ready_for_local_init_op,
+          recovery_wait_secs=1,
+          global_step=global_step)
+    else:
+      sv = tf.train.Supervisor(
+          is_chief=is_chief,
+          logdir=train_dir,
+          init_op=init_op,
+          recovery_wait_secs=1,
+          global_step=global_step)
+
+    sess_config = tf.ConfigProto(
+        allow_soft_placement=True,
+        log_device_placement=False,
+        device_filters=["/job:ps",
+                        "/job:worker/task:%d" % FLAGS.task_index])
+
+    # The chief worker (task_index==0) session will prepare the session,
+    # while the remaining workers will wait for the preparation to complete.
+    if is_chief:
+      print("Worker %d: Initializing session..." % FLAGS.task_index)
+    else:
+      print("Worker %d: Waiting for session to be initialized..." %
+            FLAGS.task_index)
+
+    if FLAGS.existing_servers:
+      server_grpc_url = "grpc://" + worker_spec[FLAGS.task_index]
+      print("Using existing server at: %s" % server_grpc_url)
+
+      sess = sv.prepare_or_wait_for_session(server_grpc_url, config=sess_config)
+    else:
+      sess = sv.prepare_or_wait_for_session(server.target, config=sess_config)
+
+    print("Worker %d: Session initialization complete." % FLAGS.task_index)
+
+    if FLAGS.sync_replicas and is_chief:
+      # Chief worker will start the chief queue runner and call the init op.
+      sess.run(sync_init_op)
+      sv.start_queue_runners(sess, [chief_queue_runner])
+
+    # Perform training
+    time_begin = time.time()
+    print("Training begins @ %f" % time_begin)
+
+    local_step = 0
+    while True:
+      # Training feed
+      #batch_xs, batch_ts = mnist.train.next_batch(FLAGS.batch_size)
+
+      batch = next_batch(batch_size, x_train, y_train_one_hot.eval(session=sess))
+      #train_feed = {x: batch_xs, t: batch_ts}
+      _, step = sess.run([train_step, global_step], feed_dict={x: batch[0], y: batch[1]})
+      local_step += 1
+
+      now = time.time()
+
+      batchtest = next_batch(batch_size, x_test, y_test_one_hot.eval(session=sess))
+
+
+      print("%f: Worker %d: training step %d done (global step: %d)" %
+            (now, FLAGS.task_index, local_step, step))
+      test_accuracy = sess.run(accuracy, feed_dict={x: batch[0], y: batch[1]})
+      print('Test Accuracy is {}'.format(test_accuracy))
+      val_xent3 = sess.run(loss, feed_dict={x: batch[0], y: batch[1]}) 
+      print("After %d training step(s), train cross entropy = %g" %
+             (step, val_xent3))     
+      if step >= FLAGS.train_steps:
+        break
+
+    time_end = time.time()
+    print("Training ends @ %f" % time_end)
+    training_time = time_end - time_begin
+    print("Training elapsed time: %f s" % training_time)
+
+    # Validation feed
+    #val_feed = {x: mnist.validation.images, t: mnist.validation.labels}
+    val_xent = sess.run(loss, feed_dict={x: batch[0], y: batch[1]})
+    print("After %d training step(s), validation cross entropy = %g" %
+          (FLAGS.train_steps, val_xent))
 
 
 if __name__ == "__main__":
