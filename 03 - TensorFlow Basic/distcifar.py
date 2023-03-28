@@ -135,6 +135,9 @@ def main(unused_argv):
 
   FLAGS.ps_hosts = ps_hosts_str
   FLAGS.worker_hosts = worker_hosts_str
+  
+  print("ps_hosts = %s" % FLAGS.ps_hosts)
+  print("worker_hosts = %s" % FLAGS.worker_hosts)
 
 
 if __name__ == "__main__":
